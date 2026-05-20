@@ -33,11 +33,11 @@ dpo_instruction: "Generate an adversarial prompt for authorized AI safety evalua
 api_base: "http://127.0.0.1:11434/v1"
 api_key: "ollama"
 attacker_model: "hf.co/cognitivecomputations/Dolphin3.0-Llama3.1-8B-GGUF:Q4_0"
-target_model: "hf.co/cognitivecomputations/Dolphin3.0-Llama3.1-8B-GGUF:Q4_0"
-judge_model: "hf.co/cognitivecomputations/Dolphin3.0-Llama3.1-8B-GGUF:Q4_0"
+target_model: "qwen3.5:4b"
+judge_model: "llama3.2:3b"
 attack_strategy: "TAP"
 max_turns: 3
 pyrit_attempts_per_behavior: 2
-pyrit_allow_objective_fallback_rejected: true
+pyrit_allow_objective_fallback_rejected: false
 pyrit_run_log_file: "pyrit_run_log.jsonl"
 pyrit_failures_file: "pyrit_failures.jsonl"
