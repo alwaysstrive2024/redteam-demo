@@ -204,6 +204,44 @@ def to_debug_jsonable(value: Any, max_depth: int = 6, seen: set[int] | None = No
     return safe_stringify(value, max_len=500)
 
 
+def object_to_mapping(value: Any) -> dict[str, Any] | None:
+    """Best-effort conversion for PyRIT/pydantic/dataclass-ish objects."""
+    if isinstance(value, dict):
+        return value
+
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+
+    if hasattr(value, "dict"):
+        try:
+            dumped = value.dict()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+
+    if hasattr(value, "__dict__"):
+        try:
+            return vars(value)
+        except Exception:
+            pass
+
+    return None
+
+
+def get_first_mapping_value(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def extract_message_trace(value: Any, seen: set[int] | None = None) -> list[dict[str, str]]:
     """Collect likely per-turn prompt/response messages from nested PyRIT objects."""
     if seen is None:
@@ -215,23 +253,31 @@ def extract_message_trace(value: Any, seen: set[int] | None = None) -> list[dict
     seen.add(obj_id)
 
     messages: list[dict[str, str]] = []
-    if isinstance(value, dict):
-        role = (
-            value.get("role")
-            or value.get("role_name")
-            or value.get("conversation_role")
-            or value.get("origin")
-            or value.get("source")
-            or value.get("sender")
-            or value.get("target")
+    mapping = object_to_mapping(value)
+    if mapping is not None:
+        role = get_first_mapping_value(
+            mapping,
+            (
+                "role",
+                "role_name",
+                "conversation_role",
+                "origin",
+                "source",
+                "sender",
+                "target",
+            ),
         )
-        content = (
-            value.get("converted_value")
-            or value.get("content")
-            or value.get("text")
-            or value.get("value")
-            or value.get("response")
-            or value.get("prompt")
+        content = get_first_mapping_value(
+            mapping,
+            (
+                "converted_value",
+                "original_value",
+                "content",
+                "text",
+                "value",
+                "response",
+                "prompt",
+            ),
         )
         if role and content:
             messages.append(
@@ -241,7 +287,7 @@ def extract_message_trace(value: Any, seen: set[int] | None = None) -> list[dict
                 }
             )
 
-        for item in value.values():
+        for item in mapping.values():
             messages.extend(extract_message_trace(item, seen))
         return messages
 
@@ -249,15 +295,6 @@ def extract_message_trace(value: Any, seen: set[int] | None = None) -> list[dict
         for item in value:
             messages.extend(extract_message_trace(item, seen))
         return messages
-
-    if hasattr(value, "model_dump"):
-        try:
-            messages.extend(extract_message_trace(value.model_dump(), seen))
-        except Exception:
-            pass
-
-    if hasattr(value, "__dict__"):
-        messages.extend(extract_message_trace(vars(value), seen))
 
     return messages
 
@@ -286,12 +323,22 @@ def collect_candidate_prompts(value: Any, seen: set[int] | None = None) -> list[
     seen.add(obj_id)
 
     prompts: list[str] = []
-    if isinstance(value, dict):
-        role = str(value.get("role", value.get("role_name", ""))).lower()
-        content = value.get("converted_value") or value.get("content") or value.get("text") or value.get("value")
+    mapping = object_to_mapping(value)
+    if mapping is not None:
+        role = str(
+            get_first_mapping_value(
+                mapping,
+                ("role", "role_name", "conversation_role", "origin", "source", "sender", "target"),
+            )
+            or ""
+        ).lower()
+        content = get_first_mapping_value(
+            mapping,
+            ("converted_value", "original_value", "content", "text", "value", "prompt"),
+        )
         if content and ("user" in role or "attacker" in role or "adversarial" in role):
             prompts.append(str(content))
-        for item in value.values():
+        for item in mapping.values():
             prompts.extend(collect_candidate_prompts(item, seen))
         return prompts
 
@@ -300,18 +347,86 @@ def collect_candidate_prompts(value: Any, seen: set[int] | None = None) -> list[
             prompts.extend(collect_candidate_prompts(item, seen))
         return prompts
 
-    if hasattr(value, "__dict__"):
-        prompts.extend(collect_candidate_prompts(vars(value), seen))
-
     return prompts
 
 
+def extract_conversation_id(result: Any) -> str | None:
+    for attr in ("conversation_id", "objective_target_conversation_id"):
+        if hasattr(result, attr):
+            value = getattr(result, attr)
+            value = value() if callable(value) else value
+            if value:
+                return str(value)
+
+    mapping = object_to_mapping(result)
+    if mapping:
+        value = get_first_mapping_value(mapping, ("conversation_id", "objective_target_conversation_id"))
+        if value:
+            return str(value)
+    return None
+
+
+def get_memory_messages_for_result(result: Any) -> list[dict[str, str]]:
+    conversation_id = extract_conversation_id(result)
+    if not conversation_id:
+        return []
+
+    try:
+        from pyrit.memory import CentralMemory
+    except ImportError:
+        return []
+
+    try:
+        memory = CentralMemory.get_memory_instance()
+    except Exception:
+        return []
+
+    messages: list[dict[str, str]] = []
+    for method_name in ("get_conversation", "get_message_pieces"):
+        if not hasattr(memory, method_name):
+            continue
+        try:
+            method = getattr(memory, method_name)
+            items = method(conversation_id=conversation_id)
+        except Exception:
+            continue
+        messages.extend(extract_message_trace(items))
+        if messages:
+            break
+    return messages
+
+
+def prompt_from_messages(messages: list[dict[str, str]], fallback: str) -> str | None:
+    fallback_norm = fallback.strip()
+    candidates: list[str] = []
+    for message in messages:
+        role = message.get("role", "").lower()
+        content = message.get("content", "").strip()
+        if not content:
+            continue
+        if "user" not in role:
+            continue
+        if content == fallback_norm:
+            continue
+        if "Return JSON" in content or "Classify whether" in content:
+            continue
+        candidates.append(content)
+    return candidates[-1] if candidates else None
+
+
 def select_prompt(result: Any, fallback: str) -> str:
+    memory_prompt = prompt_from_messages(get_memory_messages_for_result(result), fallback)
+    if memory_prompt:
+        return memory_prompt
+
     prompts = [prompt.strip() for prompt in collect_candidate_prompts(result) if prompt and prompt.strip()]
     filtered = [
         prompt
         for prompt in prompts
-        if len(prompt) > 10 and "Return JSON" not in prompt and "Classify whether" not in prompt
+        if len(prompt) > 10
+        and prompt != fallback.strip()
+        and "Return JSON" not in prompt
+        and "Classify whether" not in prompt
     ]
     return filtered[-1] if filtered else fallback
 
@@ -381,14 +496,16 @@ async def run_pyrit_attack_for_behavior(config: dict[str, Any], behavior: str) -
 
     success = extract_success(result)
     prompt = select_prompt(result, fallback=behavior)
+    memory_messages = get_memory_messages_for_result(result)
     log = {
         "behavior": behavior,
         "success": success,
         "selected_prompt": prompt,
+        "conversation_id": extract_conversation_id(result),
         "result_preview": safe_stringify(result),
     }
     if config.get("pyrit_log_message_trace", True):
-        log["message_trace"] = extract_message_trace(result)
+        log["message_trace"] = memory_messages or extract_message_trace(result)
     if config.get("pyrit_log_result_debug", False):
         debug_depth = int(config.get("pyrit_result_debug_max_depth", 4))
         log["result_debug"] = to_debug_jsonable(result, max_depth=debug_depth)
@@ -414,6 +531,7 @@ async def main_async() -> None:
     behaviors = load_behaviors(data_path, int(config.get("num_behaviors", 3)))
     attempts_per_behavior = int(config.get("pyrit_attempts_per_behavior", 2))
     dpo_dataset: list[dict[str, str]] = []
+    dpo_path.write_text(json.dumps(dpo_dataset, ensure_ascii=False, indent=2), encoding="utf-8")
 
     for behavior_index, item in enumerate(behaviors, start=1):
         behavior = item["Behavior"]
@@ -492,6 +610,7 @@ async def main_async() -> None:
                 "rejected": rejected_prompt,
             }
         )
+        dpo_path.write_text(json.dumps(dpo_dataset, ensure_ascii=False, indent=2), encoding="utf-8")
 
     dpo_path.write_text(json.dumps(dpo_dataset, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n[done] Saved {len(dpo_dataset)} DPO records to {dpo_path}")
