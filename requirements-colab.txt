@@ -1,0 +1,6 @@
+torch
+transformers>=4.45.0
+accelerate>=0.34.0
+bitsandbytes>=0.43.3
+pyyaml>=6.0
+huggingface_hub>=0.24.0
