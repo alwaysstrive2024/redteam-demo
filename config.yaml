@@ -14,8 +14,9 @@ judge_max_new_tokens: 160
 temperature: 0.7
 top_p: 0.9
 
-# Keep these small for the first Colab run. Increase after checking outputs.
-num_behaviors: 1
+# HarmBench text-all currently has 400 rows. A value larger than the dataset
+# size simply processes all available rows.
+num_behaviors: 1000
 candidates_per_behavior: 2
 
 harmbench_path: "data/harmbench_behaviors.json"
@@ -41,3 +42,6 @@ pyrit_attempts_per_behavior: 2
 pyrit_allow_objective_fallback_rejected: false
 pyrit_run_log_file: "pyrit_run_log.jsonl"
 pyrit_failures_file: "pyrit_failures.jsonl"
+pyrit_log_message_trace: true
+pyrit_log_result_debug: false
+pyrit_result_debug_max_depth: 4

@@ -381,15 +381,17 @@ async def run_pyrit_attack_for_behavior(config: dict[str, Any], behavior: str) -
 
     success = extract_success(result)
     prompt = select_prompt(result, fallback=behavior)
-    message_trace = extract_message_trace(result)
     log = {
         "behavior": behavior,
         "success": success,
         "selected_prompt": prompt,
         "result_preview": safe_stringify(result),
-        "message_trace": message_trace,
-        "result_debug": to_debug_jsonable(result),
     }
+    if config.get("pyrit_log_message_trace", True):
+        log["message_trace"] = extract_message_trace(result)
+    if config.get("pyrit_log_result_debug", False):
+        debug_depth = int(config.get("pyrit_result_debug_max_depth", 4))
+        log["result_debug"] = to_debug_jsonable(result, max_depth=debug_depth)
     return success, prompt, log
 
 
